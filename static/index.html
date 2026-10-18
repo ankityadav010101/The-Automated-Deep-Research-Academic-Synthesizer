@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f6f7f3"><title>LitReview — Research Synthesizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css"><link rel="stylesheet" href="/static/overrides.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/"><span class="brand-mark">L<span>·</span></span><span>litreview<small>RESEARCH WORKSPACE</small></span></a>
+    <div class="side-label">WORKSPACE</div>
+    <button class="nav-item active" data-view="research"><span class="nav-icon">⌕</span> Research studio</button>
+    <button class="nav-item" data-view="compare"><span class="nav-icon">⇄</span> Paired comparison</button>
+    <button class="nav-item" data-view="papers"><span class="nav-icon">▤</span> Paper library <span id="paper-count" class="nav-count">0</span></button>
+    <div class="side-label recent-label">RECENT REVIEWS</div>
+    <div id="recent-list" class="recent-list"><div class="empty-recent">Your reviews will appear here</div></div>
+    <div class="sidebar-bottom"><div class="status-dot"></div><span id="model-status">Local mode</span><button id="settings-button" title="Setup information">ⓘ</button></div>
+  </aside>
+  <main class="main">
+    <header class="topbar"><div class="breadcrumb">Workspace <span>/</span> <b id="crumb-current">Research studio</b></div><div class="top-right"><span class="privacy-pill"><i></i> Private workspace</span><div class="avatar">R</div></div></header>
+    <section id="view-research" class="view">
+      <div class="hero"><div class="eyebrow"><span></span> YOUR ACADEMIC RESEARCH ASSISTANT</div><h1>Make sense of the<br><em>research landscape.</em></h1><p>Connect the findings across papers. Every insight stays grounded in its source.</p></div>
+      <div class="workspace-grid">
+        <div class="left-column">
+          <section class="card collection-card"><div class="card-heading"><div><div class="step-label"><span>01</span> YOUR SOURCE LIBRARY</div><h2>Research collection <span class="muted" id="collection-count">0 papers</span></h2></div><button id="browse-papers" class="text-button">View library <span>↗</span></button></div>
+            <div id="dropzone" class="dropzone"><input id="file-input" type="file" accept="application/pdf,.pdf" multiple hidden><div class="upload-glyph"><span>↑</span></div><div><strong>Drop your papers here</strong><span>or <button id="choose-files" class="inline-link">browse files</button> · PDF only · up to 20 papers</span></div><span class="dropzone-note">PRIVATE &amp; SECURE</span></div>
+            <div id="mini-documents" class="mini-documents"></div>
+            <div class="collection-foot"><span><b>✳</b> Page-level citations are preserved</span><span id="capacity-label">0 / 20 papers</span></div>
+          </section>
+          <section class="card question-card"><div class="step-label"><span>02</span> YOUR RESEARCH QUESTION</div><label class="question-label" for="question">What would you like to understand?</label><textarea id="question" placeholder="e.g. How do retrieval-augmented approaches affect factual accuracy in domain-specific question answering?"></textarea>
+            <div class="question-foot"><span id="question-count">0 / 2000</span><div class="suggestions"><span>TRY:</span><button data-prompt="What methods have researchers used to address this problem, and how do their results compare?">Compare methods</button><button data-prompt="What are the key limitations and open research questions across these papers?">Find research gaps</button></div></div>
+          </section>
+          <div class="action-row"><span class="action-note">Typically takes 1–2 minutes</span><button id="generate-button" class="primary-button" disabled><span>✳</span> Generate literature review <b>→</b></button></div>
+        </div>
+        <aside class="right-column"><section class="card process-card"><div class="step-label">HOW IT WORKS</div><div class="process-step"><span class="process-num">01</span><div><b>Expand the question</b><p>Break your topic into focused sub-questions.</p></div></div><div class="process-step"><span class="process-num">02</span><div><b>Find the evidence</b><p>Search passages across your selected papers.</p></div></div><div class="process-step"><span class="process-num">03</span><div><b>Compare and synthesize</b><p>Surface patterns, differences, and gaps.</p></div></div><div class="process-step last"><span class="process-num">04</span><div><b>Trace every claim</b><p>Follow inline citations back to the PDF page.</p></div></div></section>
+          <section class="note-card"><div class="note-icon">✳</div><div><b>Built for careful reading</b><p>Review each cited passage in context. Automated comparisons are research aids, not final conclusions.</p></div></section>
+          <div class="model-note" id="model-note"></div>
+        </aside>
+      </div>
+    </section>
+    <section id="view-compare" class="view hidden">
+      <div class="page-title"><div class="eyebrow"><span></span> PARALLEL PAPER READING</div><h1>Compare two papers <em>side by side.</em></h1><p>Each paper gets its own evidence column. Click a citation to open the cited PDF page.</p></div>
+      <section class="card compare-form">
+        <div class="compare-selectors">
+          <label>Paper A<select id="compare-left"><option value="">Add two papers to your library</option></select></label>
+          <div class="compare-divider" aria-hidden="true">⇄</div>
+          <label>Paper B<select id="compare-right"><option value="">Choose a different paper</option></select></label>
+        </div>
+        <label class="compare-focus-label" for="compare-focus">Optional focus</label>
+        <input id="compare-focus" class="compare-focus" type="text" maxlength="500" placeholder="e.g. communication methods for multi-UAV coordination">
+        <div class="compare-criteria-head"><div><div class="step-label">COMPARISON DIMENSIONS</div><p>Choose up to three. Each dimension gets evidence from both papers.</p></div></div>
+        <div class="compare-criteria">
+          <label>Dimension 1<input id="compare-criterion-1" value="Methods and study design" maxlength="100"></label>
+          <label>Dimension 2<input id="compare-criterion-2" value="Main findings" maxlength="100"></label>
+          <label>Dimension 3<input id="compare-criterion-3" value="Limitations" maxlength="100"></label>
+        </div>
+        <div class="compare-submit"><span id="compare-help">Select two indexed PDFs to begin.</span><button id="compare-button" class="primary-button" disabled>Compare papers <b>→</b></button></div>
+      </section>
+    </section>
+    <section id="view-papers" class="view hidden"><div class="page-title"><div class="eyebrow"><span></span> SOURCE MANAGEMENT</div><h1>Your paper <em>library.</em></h1><p>Keep your source collection organized and inspect extraction status.</p></div><div class="card library-card"><div class="library-toolbar"><div><div class="step-label">SOURCE DOCUMENTS</div><h2>Research collection <span class="muted" id="library-count">0 papers</span></h2></div><button class="secondary-button" id="library-upload">＋ Add papers</button></div><div id="library-list" class="library-list"></div></div></section>
+    <section id="view-review" class="view hidden"><div class="review-head"><button id="back-home" class="text-button">← Research studio</button><div class="review-tools"><span class="mode-badge" id="review-mode"></span><button id="export-button" class="secondary-button">↓ Export Markdown</button></div></div><div id="review-content"></div></section>
+  </main>
+  <div id="toast" class="toast"></div>
+  <div id="progress-overlay" class="progress-overlay hidden"><div class="progress-box"><div class="spinner"></div><div class="step-label">SYNTHESIS IN PROGRESS</div><h2 id="progress-title">Finding the evidence</h2><p id="progress-message">Searching page-level passages across your papers…</p><div class="progress-track"><i></i></div><div class="progress-foot">Your sources stay attached to every finding.</div></div></div>
+  <div id="pdf-modal" class="pdf-modal hidden"><div class="pdf-header"><span id="pdf-title">Source paper</span><button id="close-pdf">×</button></div><iframe id="pdf-frame" title="PDF source"></iframe></div>
+  <script src="/static/app.js"></script>
+</body></html>
