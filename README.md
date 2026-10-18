@@ -1,3 +1,10 @@
+ HEAD
+
+ HEAD
+# The-Automated-Deep-Research-Academic-Synthesizer
+A system where you drop in 10 to 20 complex academic papers or technical PDFs on a niche subject, and it acts as an automated research assistant that can write a comprehensive literature review.
+
+ e885877 (Add academic research synthesizer)
 # LitReview — Automated Deep-Research Academic Synthesizer
 
 A local-first web app for organizing academic PDFs, retrieving page-level evidence, comparing findings, and drafting literature-review sections with traceable citations.
@@ -67,3 +74,7 @@ static/styles.css      Responsive application styling
 static/app.js          Upload, library, review, PDF citation interactions
 data/                  Runtime PDF and library storage (git-ignored)
 ```
+ HEAD
+
+ 2c042df (Add academic research synthesizer)
+ e885877 (Add academic research synthesizer)
