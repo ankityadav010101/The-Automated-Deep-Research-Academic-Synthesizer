@@ -12,7 +12,11 @@
     <a class="brand" href="/"><span class="brand-mark">L<span>·</span></span><span>litreview<small>RESEARCH WORKSPACE</small></span></a>
     <div class="side-label">WORKSPACE</div>
     <button class="nav-item active" data-view="research"><span class="nav-icon">⌕</span> Research studio</button>
-    <button class="nav-item" data-view="compare"><span class="nav-icon">⇄</span> Paired comparison</button>
+    <button class="nav-item" data-view="chat"><span class="nav-icon">◉</span> Paper chat</button>
+    <button class="nav-item" data-view="compare"><span class="nav-icon">⇄</span> Compare papers</button>
+    <button class="nav-item" data-view="claims"><span class="nav-icon">▦</span> Claim matrix</button>
+    <button class="nav-item" data-view="coverage"><span class="nav-icon">◎</span> Coverage map</button>
+    <button class="nav-item" data-view="notes"><span class="nav-icon">▧</span> Sticky notes</button>
     <button class="nav-item" data-view="papers"><span class="nav-icon">▤</span> Paper library <span id="paper-count" class="nav-count">0</span></button>
     <div class="side-label recent-label">RECENT REVIEWS</div>
     <div id="recent-list" class="recent-list"><div class="empty-recent">Your reviews will appear here</div></div>
@@ -41,29 +45,63 @@
       </div>
     </section>
     <section id="view-compare" class="view hidden">
-      <div class="page-title"><div class="eyebrow"><span></span> PARALLEL PAPER READING</div><h1>Compare two papers <em>side by side.</em></h1><p>Each paper gets its own evidence column. Click a citation to open the cited PDF page.</p></div>
+      <div class="page-title"><div class="eyebrow"><span></span> PARALLEL PAPER READING</div><h1>Compare papers <em>side by side.</em></h1><p>Select two or more papers to compare their evidence across the same dimensions. Click a citation to open its PDF page.</p></div>
       <section class="card compare-form">
-        <div class="compare-selectors">
-          <label>Paper A<select id="compare-left"><option value="">Add two papers to your library</option></select></label>
-          <div class="compare-divider" aria-hidden="true">⇄</div>
-          <label>Paper B<select id="compare-right"><option value="">Choose a different paper</option></select></label>
-        </div>
+        <div class="selection-heading"><div><div class="step-label">SOURCE PAPERS</div><p>Choose 2 to 8 indexed papers for one comparison.</p></div><span id="compare-selection-count" class="selection-count">0 selected</span></div>
+        <div id="compare-paper-list" class="paper-choice-list"></div>
         <label class="compare-focus-label" for="compare-focus">Optional focus</label>
         <input id="compare-focus" class="compare-focus" type="text" maxlength="500" placeholder="e.g. communication methods for multi-UAV coordination">
-        <div class="compare-criteria-head"><div><div class="step-label">COMPARISON DIMENSIONS</div><p>Choose up to three. Each dimension gets evidence from both papers.</p></div></div>
+        <label class="preset-label" for="compare-preset">Comparison preset</label><select id="compare-preset" class="compare-focus"><option value="general">General comparison</option><option value="study-design">Study design and evaluation</option></select>
+        <div class="compare-criteria-head"><div><div class="step-label">COMPARISON DIMENSIONS</div><p>Each dimension gets retrieved evidence from every selected paper.</p></div></div>
         <div class="compare-criteria">
           <label>Dimension 1<input id="compare-criterion-1" value="Methods and study design" maxlength="100"></label>
           <label>Dimension 2<input id="compare-criterion-2" value="Main findings" maxlength="100"></label>
           <label>Dimension 3<input id="compare-criterion-3" value="Limitations" maxlength="100"></label>
+          <label>Dimension 4<input id="compare-criterion-4" value="" maxlength="100" placeholder="Optional extra dimension"></label>
         </div>
-        <div class="compare-submit"><span id="compare-help">Select two indexed PDFs to begin.</span><button id="compare-button" class="primary-button" disabled>Compare papers <b>→</b></button></div>
+        <div class="compare-submit"><span id="compare-help">Select at least two indexed PDFs to begin.</span><button id="compare-button" class="primary-button" disabled>Compare papers <b>→</b></button></div>
+      </section>
+    </section>
+    <section id="view-chat" class="view hidden">
+      <div class="page-title"><div class="eyebrow"><span></span> ASK YOUR PAPER LIBRARY</div><h1>Chat with your <em>research.</em></h1><p>Ask questions across selected papers. Answers use retrieved passages and link back to cited pages.</p></div>
+      <section class="card chat-card">
+        <div class="chat-toolbar"><div><div class="step-label">SOURCE PAPERS</div><p>Select the papers this conversation can use. By default, all indexed papers are selected.</p></div><button id="new-chat-button" class="secondary-button">New chat</button></div>
+        <div class="saved-chat-area"><span class="step-label">SAVED THREADS</span><div id="saved-chat-list" class="saved-chat-list"><span class="chat-footnote">No saved chats yet.</span></div></div>
+        <div id="chat-paper-list" class="paper-choice-list chat-paper-list"></div>
+        <div id="chat-warning" class="model-warning hidden"></div>
+        <div id="chat-messages" class="chat-messages"><div class="chat-empty">Ask a question about your selected papers to get started.</div></div>
+        <form id="chat-form" class="chat-composer"><textarea id="chat-question" maxlength="2000" placeholder="Ask about methods, findings, limitations, or how papers relate..."></textarea><button id="chat-send" class="primary-button" type="submit" disabled>Send <b>→</b></button></form>
+        <div class="chat-footnote">Answers are based on retrieved passages from your PDFs. Check citations in the source context.</div>
       </section>
     </section>
     <section id="view-papers" class="view hidden"><div class="page-title"><div class="eyebrow"><span></span> SOURCE MANAGEMENT</div><h1>Your paper <em>library.</em></h1><p>Keep your source collection organized and inspect extraction status.</p></div><div class="card library-card"><div class="library-toolbar"><div><div class="step-label">SOURCE DOCUMENTS</div><h2>Research collection <span class="muted" id="library-count">0 papers</span></h2></div><button class="secondary-button" id="library-upload">＋ Add papers</button></div><div id="library-list" class="library-list"></div></div></section>
-    <section id="view-review" class="view hidden"><div class="review-head"><button id="back-home" class="text-button">← Research studio</button><div class="review-tools"><span class="mode-badge" id="review-mode"></span><button id="export-button" class="secondary-button">↓ Export Markdown</button></div></div><div id="review-content"></div></section>
+    <section id="view-review" class="view hidden"><div class="review-head"><button id="back-home" class="text-button">← Research studio</button><div class="review-tools"><span class="mode-badge" id="review-mode"></span><button id="export-pdf-button" class="secondary-button">Export PDF</button><button id="export-button" class="secondary-button">↓ Export Markdown</button><button id="export-csv-button" class="secondary-button">Export CSV</button></div></div><div id="review-content"></div></section>
+    <section id="view-claims" class="view hidden">
+      <div class="page-title"><div class="eyebrow"><span></span> CROSS-PAPER EVIDENCE CHECK</div><h1>Claim and evidence <em>matrix.</em></h1><p>See which papers support, challenge, or do not address claims, with source pages attached.</p></div>
+      <section class="card compare-form"><div class="selection-heading"><div><div class="step-label">SOURCE PAPERS</div><p>Choose 2 to 8 indexed papers.</p></div><span id="claims-selection-count" class="selection-count">0 selected</span></div><div id="claims-paper-list" class="paper-choice-list"></div><label class="compare-focus-label" for="claims-question">Research question or claim theme</label><input id="claims-question" class="compare-focus" maxlength="2000" placeholder="e.g. Do retrieval-augmented methods improve factual accuracy?"><div class="compare-submit"><span id="claims-help">Select papers and enter a question.</span><button id="claims-button" class="primary-button" disabled>Build claim matrix <b>→</b></button></div></section>
+    </section>
+    <section id="view-coverage" class="view hidden">
+      <div class="page-title"><div class="eyebrow"><span></span> QUESTION COVERAGE</div><h1>Find evidence <em>gaps.</em></h1><p>Break a research question into smaller searches and see which papers contain matching passages.</p></div>
+      <section class="card compare-form"><div class="selection-heading"><div><div class="step-label">SOURCE PAPERS</div><p>Choose one or more indexed papers.</p></div><span id="coverage-selection-count" class="selection-count">0 selected</span></div><div id="coverage-paper-list" class="paper-choice-list"></div><label class="compare-focus-label" for="coverage-question">Research question</label><input id="coverage-question" class="compare-focus" maxlength="2000" placeholder="What question should the papers help answer?"><div class="compare-submit"><span id="coverage-help">Select papers and enter a question.</span><button id="coverage-button" class="primary-button" disabled>Map coverage <b>→</b></button></div></section>
+    </section>
+    <section id="view-notes" class="view hidden">
+      <div class="page-title"><div class="eyebrow"><span></span> RESEARCH NOTES</div><h1>Pin what <em>matters.</em></h1><p>Attach a thought to a PDF page, paste a screenshot from any document, or capture a page from your paper library.</p></div>
+      <div class="notes-workspace">
+        <section class="card sticky-editor">
+          <div class="step-label">NEW STICKY NOTE</div>
+          <label for="sticky-paper">Link to a paper <span class="muted">optional</span></label><select id="sticky-paper"><option value="">Standalone note / another document</option></select>
+          <div class="sticky-page-row"><label for="sticky-page">Page</label><input id="sticky-page" type="number" min="1" value="1"><button id="capture-pdf-page" class="secondary-button" type="button" disabled>Capture PDF page</button></div>
+          <div id="sticky-dropzone" class="sticky-dropzone" tabindex="0"><input id="sticky-image-file" type="file" accept="image/png,image/jpeg,image/webp" hidden><img id="sticky-image-preview" class="hidden" alt="Screenshot attached to this sticky note"><div id="sticky-drop-hint"><strong>Attach a screenshot</strong><span>Paste with Ctrl+V, drop an image, or <button id="choose-sticky-image" class="inline-link" type="button">browse</button></span></div></div>
+          <label for="sticky-body">Your note</label><textarea id="sticky-body" maxlength="4000" placeholder="Write a thought, question, or reminder..."></textarea>
+          <div class="sticky-editor-actions"><label for="sticky-color">Note color</label><select id="sticky-color"><option value="yellow">Yellow</option><option value="pink">Pink</option><option value="blue">Blue</option><option value="green">Green</option></select><button id="save-sticky-note" class="primary-button" type="button">Pin note <b>→</b></button></div>
+          <p class="sticky-help">Screenshots are saved in your local project data. Notes can be linked to a paper page or kept standalone.</p>
+        </section>
+        <section class="sticky-board-section"><div class="sticky-board-heading"><div><div class="step-label">YOUR NOTES</div><h2>Research board</h2></div><span id="sticky-note-count" class="selection-count">0 notes</span></div><div id="sticky-board" class="sticky-board"><div class="paper-choice-empty">Your pinned notes will appear here.</div></div></section>
+      </div>
+    </section>
   </main>
   <div id="toast" class="toast"></div>
   <div id="progress-overlay" class="progress-overlay hidden"><div class="progress-box"><div class="spinner"></div><div class="step-label">SYNTHESIS IN PROGRESS</div><h2 id="progress-title">Finding the evidence</h2><p id="progress-message">Searching page-level passages across your papers…</p><div class="progress-track"><i></i></div><div class="progress-foot">Your sources stay attached to every finding.</div></div></div>
-  <div id="pdf-modal" class="pdf-modal hidden"><div class="pdf-header"><span id="pdf-title">Source paper</span><button id="close-pdf">×</button></div><iframe id="pdf-frame" title="PDF source"></iframe></div>
+  <div id="pdf-modal" class="pdf-modal hidden"><div class="pdf-header"><span id="pdf-title">Source paper</span><button id="close-pdf">×</button></div><iframe id="pdf-frame" title="PDF source"></iframe><section class="pdf-annotation-panel"><div class="pdf-annotation-actions"><button id="bookmark-page" class="secondary-button">Bookmark this page</button><span id="annotation-status"></span></div><label for="annotation-page">Page to annotate</label><input id="annotation-page" type="number" min="1" value="1"><label for="page-note">Page note or annotation</label><textarea id="page-note" maxlength="2000" placeholder="Add a note about this page or selected passage..."></textarea><button id="save-page-note" class="secondary-button">Save note</button><div id="page-annotations" class="page-annotations"></div></section></div>
   <script src="/static/app.js"></script>
 </body></html>

@@ -7,10 +7,10 @@ import shutil
 import uuid
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-import fitz
-from fastapi import FastAPI, File, HTTPException, UploadFile
+import pymupdf as fitz
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
 FILES = DATA / "papers"
+STICKY_IMAGES = DATA / "sticky-images"
 DB_PATH = DATA / "library.json"
 FILES.mkdir(parents=True, exist_ok=True)
 env_file = BASE / ".env"
@@ -35,11 +36,14 @@ MODEL_LAST_ERROR: str | None = None
 
 def read_db() -> dict[str, Any]:
     if not DB_PATH.exists():
-        return {"documents": [], "reviews": []}
+        return {"documents": [], "reviews": [], "chats": [], "annotations": [], "sticky_notes": []}
     try:
-        return json.loads(DB_PATH.read_text(encoding="utf-8"))
+        db = json.loads(DB_PATH.read_text(encoding="utf-8"))
+        for key in ("documents", "reviews", "chats", "annotations", "sticky_notes"):
+            db.setdefault(key, [])
+        return db
     except (json.JSONDecodeError, OSError):
-        return {"documents": [], "reviews": []}
+        return {"documents": [], "reviews": [], "chats": [], "annotations": [], "sticky_notes": []}
 
 
 def write_db(db: dict[str, Any]) -> None:
@@ -123,6 +127,7 @@ def model_json(system: str, user: str) -> Any | None:
         result = client.chat.completions.create(
             model=os.getenv("OPENAI_MODEL", default_model), temperature=0.2,
             response_format={"type": "json_object"},
+            max_tokens=1800,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         )
         MODEL_LAST_ERROR = None
@@ -216,10 +221,57 @@ class ReviewRequest(BaseModel):
 
 
 class CompareRequest(BaseModel):
-    left_document_id: str
-    right_document_id: str
+    document_ids: list[str] = Field(min_length=2, max_length=8)
     focus: str = Field(default="", max_length=500)
     criteria: list[str] = Field(default_factory=lambda: ["Methods and study design", "Main findings", "Limitations"])
+
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=4000)
+
+
+class ChatRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    document_ids: list[str] = Field(default_factory=list, max_length=20)
+    history: list[ChatTurn] = Field(default_factory=list, max_length=8)
+
+
+class MultiPaperRequest(BaseModel):
+    question: str = Field(min_length=3, max_length=2000)
+    document_ids: list[str] = Field(min_length=2, max_length=8)
+
+
+class ClaimVerificationRequest(BaseModel):
+    claim_index: int = Field(ge=0, le=4)
+    paper_index: int = Field(ge=0, le=7)
+    status: Literal["supported", "contradicted", "not_addressed", "unclear"]
+    note: str = Field(default="", max_length=1000)
+    study_context: str = Field(default="", max_length=600)
+
+
+class CoverageRequest(BaseModel):
+    question: str = Field(min_length=3, max_length=2000)
+    document_ids: list[str] = Field(min_length=1, max_length=20)
+
+
+class SavedChatRequest(BaseModel):
+    document_ids: list[str] = Field(default_factory=list, max_length=20)
+    messages: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+
+
+class AnnotationRequest(BaseModel):
+    document_id: str
+    page: int = Field(ge=1)
+    kind: Literal["note", "bookmark", "highlight"] = "note"
+    body: str = Field(default="", max_length=2000)
+    selected_text: str = Field(default="", max_length=2000)
+    chunk_id: str = Field(default="", max_length=100)
+
+
+class StickyNoteUpdate(BaseModel):
+    body: str = Field(default="", max_length=4000)
+    color: Literal["yellow", "pink", "blue", "green"] = "yellow"
 
 
 @app.get("/")
@@ -288,6 +340,21 @@ def pdf_file(doc_id: str):
     if not any(d["id"] == doc_id for d in read_db()["documents"]):
         raise HTTPException(404, "Document not found")
     return FileResponse(FILES / f"{doc_id}.pdf", media_type="application/pdf")
+
+
+@app.get("/api/documents/{doc_id}/pages/{page_no}/image")
+def pdf_page_image(doc_id: str, page_no: int):
+    document = next((d for d in read_db()["documents"] if d["id"] == doc_id), None)
+    if not document:
+        raise HTTPException(404, "Document not found")
+    if page_no < 1 or page_no > document.get("page_count", 0):
+        raise HTTPException(400, "Page number is outside this PDF")
+    path = FILES / f"{doc_id}.pdf"
+    with fitz.open(path) as pdf:
+        page = pdf.load_page(page_no - 1)
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
+        return Response(content=pixmap.tobytes("png"), media_type="image/png",
+                        headers={"Cache-Control": "no-store"})
 
 
 def retrieve(docs: list[dict[str, Any]], query: str, limit: int) -> list[dict[str, Any]]:
@@ -404,19 +471,19 @@ def create_review(req: ReviewRequest):
 def compare_papers(req: CompareRequest):
     global MODEL_LAST_ERROR
     MODEL_LAST_ERROR = None
-    if req.left_document_id == req.right_document_id:
-        raise HTTPException(400, "Choose two different papers to compare.")
+    if len(set(req.document_ids)) != len(req.document_ids):
+        raise HTTPException(400, "Choose each paper only once.")
     db = read_db()
     by_id = {d["id"]: d for d in db["documents"]}
-    left_doc = by_id.get(req.left_document_id)
-    right_doc = by_id.get(req.right_document_id)
-    if not left_doc or not right_doc:
+    selected = [by_id.get(doc_id) for doc_id in req.document_ids]
+    if any(doc is None for doc in selected):
         raise HTTPException(404, "One of the selected papers is no longer in the library.")
-    if not left_doc.get("chunks") or not right_doc.get("chunks"):
-        raise HTTPException(400, "Both papers need searchable text. Scanned PDFs need OCR before comparison.")
+    papers = [doc for doc in selected if doc is not None]
+    if any(not doc.get("chunks") for doc in papers):
+        raise HTTPException(400, "Every selected paper needs searchable text. Scanned PDFs need OCR before comparison.")
 
     criteria = []
-    for item in req.criteria[:3]:
+    for item in req.criteria[:4]:
         value = re.sub(r"\s+", " ", str(item)).strip()[:100]
         if value and value not in criteria:
             criteria.append(value)
@@ -433,69 +500,70 @@ def compare_papers(req: CompareRequest):
     }
     evidence: list[dict[str, Any]] = []
     row_evidence: list[dict[str, Any]] = []
-    seen: set[str] = set()
     for criterion in criteria:
         terms = " ".join(v for key, v in query_terms.items() if key in criterion.lower())
         query = " ".join(part for part in (req.focus.strip(), criterion, terms) if part)
-        sides = []
-        for doc in (left_doc, right_doc):
-            hits = retrieve([doc], query, 2)
-            hit = next((h for h in hits if f"{doc['id']}:{h['id']}" not in seen), hits[0] if hits else None)
+        cells = []
+        for doc in papers:
+            hits = retrieve([doc], query, 1)
+            hit = hits[0] if hits else None
             if hit:
-                seen.add(f"{doc['id']}:{hit['id']}")
                 hit["subquery"] = criterion
                 evidence.append(hit)
-                sides.append(f"[S{len(evidence)}]")
+                cells.append(f"[S{len(evidence)}]")
             else:
-                sides.append(None)
-        row_evidence.append({"criterion": criterion, "left_ref": sides[0], "right_ref": sides[1]})
+                cells.append(None)
+        row_evidence.append({"criterion": criterion, "refs": cells})
 
-    compact = [{"ref": f"[S{i+1}]", "paper": e["title"], "page": e["page"], "text": e["text"]}
+    ollama = os.getenv("MODEL_PROVIDER", "openai").lower() == "ollama"
+    compact = [{"ref": f"[S{i+1}]", "document_id": e["document_id"],
+                "paper": e["title"], "page": e["page"], "text": e["text"][:700]}
                for i, e in enumerate(evidence)]
+    model_compact = [{**item, "text": item["text"][:240] if ollama else item["text"]}
+                     for item in compact]
     comparison = model_json(
-        "Compare exactly the two named papers in the supplied evidence. Do not change the topic or introduce tools or facts not in the papers. Return JSON with comparison_rows, one row for each supplied criterion, each shaped {criterion,left,right,difference}. left must use evidence only from the first paper; right only from the second; difference may use both. Do not write citation labels; the app attaches source citations to each column. If the supplied passages do not establish a detail, say 'Not reported in the retrieved passages.' Do not guess. Keep cells concise.",
-        json.dumps({"focus": req.focus, "paper_left": left_doc["title"], "paper_right": right_doc["title"],
-                    "criteria": row_evidence, "evidence": compact}, ensure_ascii=False)) if evidence else None
+        "Compare the named academic papers using only the supplied passages. Return JSON with comparison_rows, one row per supplied criterion, each shaped {criterion,cells:[...]}. Each row's cells must have one concise string per paper, in the exact paper order supplied. Never transfer a fact from one paper to another. Do not include citation labels; the app attaches citations to each cell. If evidence does not establish a detail, say 'Not reported in the retrieved passages.' Do not guess.",
+        json.dumps({"focus": req.focus, "papers": [{"id": d["id"], "title": d["title"]} for d in papers],
+                    "criteria": row_evidence, "evidence": model_compact}, ensure_ascii=False)) if evidence else None
 
-    model_rows = comparison.get("comparison_rows", []) if comparison else []
-    model_ok = isinstance(model_rows, list) and len(model_rows) == len(criteria) and all(isinstance(row, dict) for row in model_rows)
+    model_rows = comparison.get("comparison_rows", []) if isinstance(comparison, dict) else []
+    model_ok = (isinstance(model_rows, list) and len(model_rows) == len(criteria) and
+                all(isinstance(row, dict) and isinstance(row.get("cells"), list) and
+                    len(row["cells"]) == len(papers) for row in model_rows))
 
     rows = []
     if model_ok:
         for i, row in enumerate(model_rows):
             expected = row_evidence[i]
-            def attach_source(text: Any, refs: list[str]) -> str:
-                clean = re.sub(r"\[?S\d+\]?", "", str(text), flags=re.I)
+            cells = []
+            for j, value in enumerate(row["cells"]):
+                ref = expected["refs"][j]
+                clean = re.sub(r"\[?S\d+\]?", "", str(value))
                 clean = re.sub(r"\s+", " ", clean).strip()
-                return (clean + (" " if clean else "") + " ".join(refs)).strip()
-            left_cell = attach_source(row.get("left", ""), [expected["left_ref"]]) if expected["left_ref"] else "No matching passage was found in the retrieved text."
-            right_cell = attach_source(row.get("right", ""), [expected["right_ref"]]) if expected["right_ref"] else "No matching passage was found in the retrieved text."
-            refs = [ref for ref in (expected["left_ref"], expected["right_ref"]) if ref]
-            difference = attach_source(row.get("difference", ""), refs) if len(refs) == 2 else "Insufficient retrieved evidence from both papers to compare this dimension."
-            rows.append({"criterion": str(row.get("criterion", criteria[i])),
-                         "left": left_cell, "right": right_cell, "difference": difference})
+                cells.append((clean + (" " if clean else "") + ref).strip() if ref else
+                             "No matching passage was found in the retrieved text.")
+            rows.append({"criterion": criteria[i], "cells": cells})
         mode = "model"
     else:
         if comparison:
-            MODEL_LAST_ERROR = "The model comparison did not return valid citations for both papers; showing the retrieved passages instead."
+            MODEL_LAST_ERROR = "The model comparison did not return a valid cell for every paper; showing the retrieved passages instead."
         for item in row_evidence:
             def quote(ref: str | None) -> str:
                 if not ref:
                     return "No matching passage was found in the retrieved text."
                 ev = evidence[int(ref[2:-1]) - 1]
                 return f"{ev['text'].strip()} {ref}"
-            rows.append({"criterion": item["criterion"], "left": quote(item["left_ref"]),
-                         "right": quote(item["right_ref"]),
-                         "difference": "Compare the cited passages directly; model synthesis was unavailable."})
+            rows.append({"criterion": item["criterion"], "cells": [quote(ref) for ref in item["refs"]]})
         mode = "extractive"
 
+    summary = (f"Evidence-led comparison of {len(papers)} papers across {len(criteria)} dimensions. "
+               "Each paper column is grounded in retrieved passages from that source.")
     review = {
         "id": uuid.uuid4().hex[:12],
-        "title": f"Paired comparison: {left_doc['title']} vs. {right_doc['title']}",
-        "summary": f"Side-by-side comparison of {len(criteria)} criteria. Each cell is tied to passages retrieved from its paper.",
+        "title": f"Comparison across {len(papers)} papers",
+        "summary": summary,
         "comparison_rows": rows,
-        "comparison_papers": [{"id": left_doc["id"], "title": left_doc["title"]},
-                              {"id": right_doc["id"], "title": right_doc["title"]}],
+        "comparison_papers": [{"id": d["id"], "title": d["title"]} for d in papers],
         "evidence": [{**compact[i], "document_id": evidence[i]["document_id"], "chunk_id": evidence[i]["id"],
                       "score": evidence[i]["score"], "subquery": evidence[i]["subquery"]}
                      for i in range(len(evidence))],
@@ -507,6 +575,445 @@ def compare_papers(req: CompareRequest):
     db["reviews"].append(review)
     write_db(db)
     return review
+
+
+@app.post("/api/chat")
+def chat(req: ChatRequest):
+    global MODEL_LAST_ERROR
+    MODEL_LAST_ERROR = None
+    db = read_db()
+    requested_ids = set(req.document_ids)
+    selected = [d for d in db["documents"] if d.get("status") == "ready" and d.get("chunks") and
+                (not requested_ids or d["id"] in requested_ids)]
+    if not selected:
+        raise HTTPException(400, "Select at least one indexed paper with searchable text.")
+
+    # Include the latest user turn in lexical retrieval so follow-up questions like
+    # “what about the limitations?” retain some context about the topic.
+    previous_question = next((turn.content for turn in reversed(req.history) if turn.role == "user"), "")
+    search_query = " ".join((previous_question, req.question)).strip()
+    ollama = os.getenv("MODEL_PROVIDER", "openai").lower() == "ollama"
+    # Give local models enough evidence to cover each selected paper separately.
+    source_limit = min(12, max(8, len(selected) * 2)) if ollama else 10
+    ranked = retrieve(selected, search_query, max(source_limit, min(len(selected) * 2, 40)))
+    evidence, per_doc = [], Counter()
+    for hit in ranked:
+        if per_doc[hit["document_id"]] >= 2:
+            continue
+        evidence.append(hit)
+        per_doc[hit["document_id"]] += 1
+        if len(evidence) >= source_limit:
+            break
+    if not evidence:
+        raise HTTPException(400, "No passages matched. Try a more specific question or select other papers.")
+
+    compact = [{"ref": f"[S{i+1}]", "paper": e["title"], "page": e["page"], "text": e["text"][:900]}
+               for i, e in enumerate(evidence)]
+    turns = [{"role": t.role, "content": t.content[:800]} for t in req.history[-4:]]
+    model_compact = [{**item, "text": item["text"][:1000] if ollama else item["text"]}
+                     for item in compact]
+    result = model_json(
+        "You answer questions about a selected academic paper library. Use only the supplied passages for factual claims. "
+        "Cite each factual claim inline using the supplied labels exactly, such as [S1]. Do not invent citations or outside facts. "
+        "If the user asks to compare or discuss papers separately, make a clearly titled subsection for EVERY selected paper, "
+        "in the supplied paper order. For each paper, explain its relevant approach, findings, and limitations when the evidence supports them; "
+        "then add a short cross-paper comparison explaining similarities and differences. Never attribute one paper's evidence to another. "
+        "Use several substantive sentences per paper when requested, and do not compress the whole answer into a few generic paragraphs. "
+        "If evidence is missing for a detail, say so. If the passages do not answer the question, say so clearly. "
+        "Return JSON {answer: string}; use readable headings and paragraphs.",
+        json.dumps({"question": req.question, "conversation": turns,
+                    "selected_papers": [d["title"] for d in selected], "evidence": model_compact}, ensure_ascii=False))
+    answer = str(result.get("answer", "")).strip() if isinstance(result, dict) else ""
+    answer = normalize_citation_style(answer)
+    valid_refs = {f"S{i+1}" for i in range(len(evidence))}
+    refs = set(re.findall(r"\[(S\d+)\]", answer))
+    grounded = bool(answer and refs and refs.issubset(valid_refs))
+    if not grounded:
+        if result and answer:
+            MODEL_LAST_ERROR = "The chat answer did not include valid inline citations, so retrieved source passages are shown instead."
+        answer = "I couldn't produce a grounded synthesis for this turn. Here are the most relevant passages I found:\n\n" + \
+            "\n\n".join(f"{e['title']} (p. {e['page']}): {e['text'].strip()} [S{i+1}]"
+                            for i, e in enumerate(evidence))
+    return {"answer": answer, "warning": MODEL_LAST_ERROR,
+            "evidence": [{**compact[i], "document_id": evidence[i]["document_id"],
+                          "chunk_id": evidence[i]["id"]} for i in range(len(evidence))]}
+
+
+@app.get("/api/chats")
+def saved_chats():
+    return [{"id": c["id"], "title": c["title"], "updated_at": c["updated_at"]}
+            for c in sorted(read_db()["chats"], key=lambda c: c.get("updated_at", ""), reverse=True)]
+
+
+@app.get("/api/chats/{chat_id}")
+def get_chat(chat_id: str):
+    chat_record = next((c for c in read_db()["chats"] if c["id"] == chat_id), None)
+    if not chat_record:
+        raise HTTPException(404, "Chat not found")
+    return chat_record
+
+
+@app.post("/api/chats")
+def create_chat(req: SavedChatRequest):
+    db = read_db()
+    first_question = next((str(m.get("content", "")) for m in req.messages if m.get("role") == "user"), "Research chat")
+    record = {"id": uuid.uuid4().hex[:12], "title": first_question[:90],
+              "document_ids": req.document_ids, "messages": req.messages,
+              "updated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()}
+    db["chats"].append(record)
+    write_db(db)
+    return record
+
+
+@app.put("/api/chats/{chat_id}")
+def update_chat(chat_id: str, req: SavedChatRequest):
+    db = read_db()
+    record = next((c for c in db["chats"] if c["id"] == chat_id), None)
+    if not record:
+        raise HTTPException(404, "Chat not found")
+    first_question = next((str(m.get("content", "")) for m in req.messages if m.get("role") == "user"), record["title"])
+    record.update({"title": first_question[:90], "document_ids": req.document_ids,
+                   "messages": req.messages,
+                   "updated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()})
+    write_db(db)
+    return record
+
+
+@app.post("/api/claims")
+def claim_matrix(req: MultiPaperRequest):
+    global MODEL_LAST_ERROR
+    MODEL_LAST_ERROR = None
+    if len(set(req.document_ids)) != len(req.document_ids):
+        raise HTTPException(400, "Choose each paper only once.")
+    db = read_db()
+    by_id = {d["id"]: d for d in db["documents"]}
+    papers = [by_id.get(doc_id) for doc_id in req.document_ids]
+    if any(d is None for d in papers):
+        raise HTTPException(404, "One of the selected papers is no longer in the library.")
+    papers = [d for d in papers if d is not None]
+    if any(not d.get("chunks") for d in papers):
+        raise HTTPException(400, "Every selected paper needs searchable text.")
+    evidence = []
+    for paper in papers:
+        for hit in retrieve([paper], req.question, 2):
+            hit["subquery"] = req.question
+            evidence.append(hit)
+    if not evidence:
+        raise HTTPException(400, "No passages matched the question in the selected papers.")
+    compact = [{"ref": f"[S{i+1}]", "document_id": e["document_id"], "paper": e["title"],
+                "page": e["page"], "text": e["text"][:300]}
+               for i, e in enumerate(evidence)]
+    ollama = os.getenv("MODEL_PROVIDER", "openai").lower() == "ollama"
+    prompt_evidence = [{**item, "text": item["text"][:220] if ollama else item["text"]}
+                       for item in compact]
+    result = model_json(
+        "Extract up to five specific, evidence-checkable claims relevant to the question. Use only the supplied excerpts. "
+        "For every paper, classify each claim as supports, challenges, not_addressed, or unclear. Use challenges only when the paper explicitly reports a conflicting result; do not infer contradiction from different topics or methods. "
+        "Return exactly one claim row. Use a concise version of the user's question as the claim. That row must contain exactly one assessment for every supplied paper, in the same order as the papers list, including papers whose excerpts do not address it. Return JSON {claims:[{claim, assessments:[{status,assessment}]}]}. Do not create separate claims per paper and do not include paper IDs. Keep each assessment short and do not invent details.",
+        json.dumps({"question": req.question, "papers": [{"id": p["id"], "title": p["title"]} for p in papers],
+                    "evidence": prompt_evidence}, ensure_ascii=False))
+    raw_claims = result.get("claims", result.get("claim_rows", result.get("rows", []))) if isinstance(result, dict) else []
+    if isinstance(raw_claims, dict):
+        raw_claims = [raw_claims]
+    valid_statuses = {"supports", "challenges", "not_addressed", "unclear"}
+    def ordered_assessments(row: dict[str, Any]) -> list[Any]:
+        values = row.get("assessments", row.get("cells", row.get("papers", [])))
+        if isinstance(values, dict):
+            return [values.get(p["id"], values.get(p["title"], {})) for p in papers]
+        return values if isinstance(values, list) else []
+    standard_shape = isinstance(raw_claims, list) and raw_claims and all(
+        isinstance(row, dict) and isinstance(ordered_assessments(row), list) and
+        len(ordered_assessments(row)) == len(papers) for row in raw_claims[:5])
+    if not standard_shape and isinstance(raw_claims, list):
+        # Small local models sometimes emit one paper-specific row per paper.
+        # Recover those assessments by matching paper-title words in each claim.
+        grouped: list[list[dict[str, Any]]] = [[] for _ in papers]
+        for row in raw_claims[:8]:
+            if not isinstance(row, dict):
+                continue
+            values = ordered_assessments(row)
+            if len(values) != 1:
+                continue
+            claim_words = words(str(row.get("claim", row.get("statement", ""))))
+            overlaps = [len(claim_words & words(p["title"])) for p in papers]
+            best = max(overlaps, default=0)
+            if best < 3 or overlaps.count(best) != 1:
+                continue
+            index = overlaps.index(best)
+            assessment = values[0]
+            if isinstance(assessment, str):
+                assessment = {"assessment": assessment}
+            if isinstance(assessment, dict):
+                grouped[index].append(assessment)
+        if all(grouped):
+            collapsed = []
+            for entries in grouped:
+                statuses = []
+                descriptions = []
+                for entry in entries:
+                    raw_status = str(entry.get("status", "unclear")).strip().lower().replace(" ", "_")
+                    aliases = {"supported": "supports", "support": "supports", "contradicts": "challenges",
+                               "contradicted": "challenges", "conflicts": "challenges", "not_found": "not_addressed",
+                               "no_evidence": "not_addressed", "mixed": "unclear"}
+                    raw_status = aliases.get(raw_status, raw_status)
+                    statuses.append(raw_status if raw_status in valid_statuses else "unclear")
+                    text = str(entry.get("assessment", entry.get("evidence", entry.get("reason", "")))).strip()
+                    if text and text not in descriptions:
+                        descriptions.append(text)
+                status_counts = Counter(statuses)
+                status = status_counts.most_common(1)[0][0] if len(status_counts) == 1 else "unclear"
+                collapsed.append({"status": status, "assessment": " ".join(descriptions[:2])[:500]})
+            raw_claims = [{"claim": req.question, "assessments": collapsed}]
+            standard_shape = True
+    valid = bool(standard_shape)
+    rows = []
+    if valid:
+        for row in raw_claims[:5]:
+            cells = []
+            for assessment in ordered_assessments(row):
+                if isinstance(assessment, str):
+                    assessment = {"assessment": assessment}
+                if not isinstance(assessment, dict):
+                    assessment = {}
+                status = assessment.get("status", "unclear") if isinstance(assessment, dict) else "unclear"
+                status_text = str(status).strip().lower().replace(" ", "_")
+                status_aliases = {"supported": "supports", "support": "supports", "supports": "supports",
+                                  "contradicts": "challenges", "contradicted": "challenges", "conflicts": "challenges",
+                                  "not_addressed": "not_addressed", "not_found": "not_addressed", "no_evidence": "not_addressed",
+                                  "unclear": "unclear", "mixed": "unclear"}
+                status = status_aliases.get(status_text, status_text)
+                status = status if status in valid_statuses else "unclear"
+                text = str(assessment.get("assessment", ""))[:500] if isinstance(assessment, dict) else ""
+                if not text:
+                    text = str(assessment.get("evidence", assessment.get("reason", assessment.get("summary", ""))))[:500]
+                paper = papers[len(cells)]
+                refs = [f"[S{i+1}]" for i, e in enumerate(evidence) if e["document_id"] == paper["id"]]
+                cells.append({"status": status, "text": text or "No specific assessment returned.", "refs": refs})
+            rows.append({"claim": str(row.get("claim", "Claim"))[:500], "cells": cells})
+    else:
+        if result:
+            MODEL_LAST_ERROR = "The model did not return a valid claim matrix; showing retrieved evidence for manual review."
+        cells = []
+        for paper in papers:
+            matching = [(i, e) for i, e in enumerate(evidence) if e["document_id"] == paper["id"]]
+            cells.append({"status": "unclear",
+                          "text": "Model assessment unavailable. Inspect the retrieved passage directly." if matching else "No matching passage was retrieved.",
+                          "refs": [f"[S{i+1}]" for i, _ in matching]})
+        rows = [{"claim": req.question, "cells": cells}]
+    review = {"id": uuid.uuid4().hex[:12], "title": "Claim and evidence matrix",
+              "summary": f"Evidence map for {len(papers)} papers. Labels are model assessments to verify against the cited passages.",
+              "claim_rows": rows, "comparison_papers": [{"id": p["id"], "title": p["title"]} for p in papers],
+              "evidence": [{**compact[i], "chunk_id": evidence[i]["id"]} for i in range(len(evidence))],
+              "mode": "model" if valid else "extractive",
+              "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()}
+    if not valid:
+        review["warning"] = MODEL_LAST_ERROR or "Model analysis unavailable; inspect retrieved passages manually."
+    db["reviews"].append(review)
+    write_db(db)
+    return review
+
+
+@app.put("/api/reviews/{review_id}/verification")
+def verify_claim(review_id: str, req: ClaimVerificationRequest):
+    db = read_db()
+    review = next((r for r in db["reviews"] if r["id"] == review_id), None)
+    if not review or not review.get("claim_rows"):
+        raise HTTPException(404, "Claim review not found")
+    if req.claim_index >= len(review["claim_rows"]):
+        raise HTTPException(404, "Claim row not found")
+    row = review["claim_rows"][req.claim_index]
+    cells = row.get("cells", [])
+    if req.paper_index >= len(cells):
+        raise HTTPException(404, "Paper assessment not found")
+    verification = {"status": req.status, "note": req.note.strip(),
+                    "study_context": req.study_context.strip(),
+                    "updated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()}
+    cells[req.paper_index]["verification"] = verification
+    write_db(db)
+    return verification
+
+
+@app.post("/api/coverage")
+def question_coverage(req: CoverageRequest):
+    db = read_db()
+    by_id = {d["id"]: d for d in db["documents"]}
+    selected = [by_id.get(doc_id) for doc_id in req.document_ids]
+    if any(d is None for d in selected):
+        raise HTTPException(404, "One of the selected papers is no longer in the library.")
+    papers = [d for d in selected if d is not None]
+    if any(not d.get("chunks") for d in papers):
+        raise HTTPException(400, "Every selected paper needs searchable text.")
+    expansion = model_json(
+        "Break this research question into four short, distinct evidence-searchable subquestions. Return JSON {subqueries:[string]}. Do not answer the question.",
+        req.question)
+    queries = normalize_subqueries(expansion.get("subqueries", []))[:5] if isinstance(expansion, dict) else []
+    if not queries:
+        queries = [req.question, f"methods and study design: {req.question}",
+                   f"main findings and outcomes: {req.question}", f"limitations and future work: {req.question}"]
+    evidence, rows = [], []
+    for query in queries:
+        cells = []
+        for paper in papers:
+            hits = retrieve([paper], query, 1)
+            if hits:
+                hit = hits[0]
+                evidence.append(hit)
+                cells.append({"found": True, "ref": f"[S{len(evidence)}]"})
+            else:
+                cells.append({"found": False, "ref": None})
+        rows.append({"question": query, "cells": cells})
+    review = {"id": uuid.uuid4().hex[:12], "title": "Research question coverage map",
+              "summary": "Shows where lexical retrieval found a relevant passage for each subquestion and paper. A match indicates possible coverage, not that the question is fully answered.",
+              "coverage_rows": rows, "comparison_papers": [{"id": p["id"], "title": p["title"]} for p in papers],
+              "evidence": [{"ref": f"[S{i+1}]", "paper": e["title"], "page": e["page"], "text": e["text"],
+                            "document_id": e["document_id"], "chunk_id": e["id"]} for i, e in enumerate(evidence)],
+              "mode": "retrieval", "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()}
+    db["reviews"].append(review)
+    write_db(db)
+    return review
+
+
+@app.get("/api/annotations")
+def annotations(document_id: str | None = None, page: int | None = None):
+    items = read_db()["annotations"]
+    if document_id:
+        items = [item for item in items if item["document_id"] == document_id]
+    if page is not None:
+        items = [item for item in items if item["page"] == page]
+    return items
+
+
+@app.post("/api/annotations")
+def add_annotation(req: AnnotationRequest):
+    db = read_db()
+    doc = next((d for d in db["documents"] if d["id"] == req.document_id), None)
+    if not doc:
+        raise HTTPException(404, "Paper not found")
+    if req.page > doc.get("page_count", 0):
+        raise HTTPException(400, "Page number is outside this PDF")
+    if req.kind != "bookmark" and not req.body.strip() and not req.selected_text.strip():
+        raise HTTPException(400, "Add a note or select a passage before saving.")
+    record = {"id": uuid.uuid4().hex[:12], "document_id": req.document_id, "page": req.page,
+              "kind": req.kind, "body": req.body.strip(), "selected_text": req.selected_text.strip(),
+              "chunk_id": req.chunk_id,
+              "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()}
+    db["annotations"].append(record)
+    write_db(db)
+    return record
+
+
+@app.delete("/api/annotations/{annotation_id}")
+def delete_annotation(annotation_id: str):
+    db = read_db()
+    before = len(db["annotations"])
+    db["annotations"] = [item for item in db["annotations"] if item["id"] != annotation_id]
+    if len(db["annotations"]) == before:
+        raise HTTPException(404, "Annotation not found")
+    write_db(db)
+    return {"deleted": annotation_id}
+
+
+def public_sticky_note(note: dict[str, Any], db: dict[str, Any]) -> dict[str, Any]:
+    document = next((d for d in db["documents"] if d["id"] == note.get("document_id")), None)
+    return {**note, "image_url": f"/api/sticky-notes/{note['id']}/image" if note.get("image_filename") else None,
+            "document_title": document.get("title") if document else None,
+            "document_exists": bool(document)}
+
+
+@app.get("/api/sticky-notes")
+def list_sticky_notes():
+    db = read_db()
+    notes = sorted(db["sticky_notes"], key=lambda n: n.get("updated_at", n.get("created_at", "")), reverse=True)
+    return [public_sticky_note(note, db) for note in notes]
+
+
+@app.post("/api/sticky-notes")
+async def create_sticky_note(
+    body: str = Form(...),
+    color: str = Form("yellow"),
+    document_id: str = Form(""),
+    page: int = Form(0),
+    screenshot: UploadFile | None = File(None),
+):
+    color = color if color in {"yellow", "pink", "blue", "green"} else "yellow"
+    body = body.strip()
+    if not body and not screenshot:
+        raise HTTPException(400, "Add note text or attach a screenshot.")
+    db = read_db()
+    document = None
+    if document_id:
+        document = next((d for d in db["documents"] if d["id"] == document_id), None)
+        if not document:
+            raise HTTPException(404, "Selected paper was not found.")
+        if page < 1 or page > document.get("page_count", 0):
+            raise HTTPException(400, "Choose a valid page for the selected paper.")
+    elif page:
+        raise HTTPException(400, "Select a paper before linking a page number.")
+
+    note_id = uuid.uuid4().hex[:12]
+    image_filename = ""
+    if screenshot and screenshot.filename:
+        mime = (screenshot.content_type or "").lower()
+        if mime not in {"image/png", "image/jpeg", "image/webp"}:
+            raise HTTPException(400, "Attach a PNG, JPEG, or WebP screenshot.")
+        content = await screenshot.read(8 * 1024 * 1024 + 1)
+        if len(content) > 8 * 1024 * 1024:
+            raise HTTPException(413, "Screenshot must be 8 MB or smaller.")
+        valid_image = ((mime == "image/png" and content.startswith(b"\x89PNG\r\n\x1a\n")) or
+                       (mime == "image/jpeg" and content.startswith(b"\xff\xd8\xff")) or
+                       (mime == "image/webp" and content.startswith(b"RIFF") and content[8:12] == b"WEBP"))
+        if not valid_image:
+            raise HTTPException(400, "The attached file is not a valid supported image.")
+        extension = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[mime]
+        STICKY_IMAGES.mkdir(parents=True, exist_ok=True)
+        image_filename = f"{note_id}{extension}"
+        (STICKY_IMAGES / image_filename).write_bytes(content)
+
+    now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    note = {"id": note_id, "body": body[:4000], "color": color,
+            "document_id": document_id or "", "page": page if document else 0,
+            "image_filename": image_filename, "created_at": now, "updated_at": now}
+    db["sticky_notes"].append(note)
+    write_db(db)
+    return public_sticky_note(note, db)
+
+
+@app.put("/api/sticky-notes/{note_id}")
+def update_sticky_note(note_id: str, req: StickyNoteUpdate):
+    db = read_db()
+    note = next((n for n in db["sticky_notes"] if n["id"] == note_id), None)
+    if not note:
+        raise HTTPException(404, "Sticky note not found")
+    if not req.body.strip() and not note.get("image_filename"):
+        raise HTTPException(400, "Add note text or keep a screenshot attached.")
+    note.update({"body": req.body.strip(), "color": req.color,
+                 "updated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()})
+    write_db(db)
+    return public_sticky_note(note, db)
+
+
+@app.delete("/api/sticky-notes/{note_id}")
+def delete_sticky_note(note_id: str):
+    db = read_db()
+    note = next((n for n in db["sticky_notes"] if n["id"] == note_id), None)
+    if not note:
+        raise HTTPException(404, "Sticky note not found")
+    db["sticky_notes"] = [n for n in db["sticky_notes"] if n["id"] != note_id]
+    if note.get("image_filename"):
+        (STICKY_IMAGES / note["image_filename"]).unlink(missing_ok=True)
+    write_db(db)
+    return {"deleted": note_id}
+
+
+@app.get("/api/sticky-notes/{note_id}/image")
+def sticky_note_image(note_id: str):
+    note = next((n for n in read_db()["sticky_notes"] if n["id"] == note_id), None)
+    if not note or not note.get("image_filename"):
+        raise HTTPException(404, "Screenshot not found")
+    image_path = STICKY_IMAGES / note["image_filename"]
+    if not image_path.exists():
+        raise HTTPException(404, "Screenshot file is missing")
+    return FileResponse(image_path, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/reviews")
@@ -531,11 +1038,38 @@ def markdown(review_id: str):
     out = [f"# {review['title']}", "", review.get("summary", ""), ""]
     if review.get("comparison_rows"):
         papers = review.get("comparison_papers", [{"title": "Paper A"}, {"title": "Paper B"}])
-        out.extend([f"| Criterion | {papers[0]['title']} | {papers[1]['title']} | Difference |",
-                    "|---|---|---|---|"])
+        if review["comparison_rows"][0].get("cells") is not None:
+            headings = ["Criterion"] + [p["title"] for p in papers]
+            out.extend(["| " + " | ".join(headings) + " |", "|" + "---|" * len(headings)])
+        else:
+            out.extend([f"| Criterion | {papers[0]['title']} | {papers[1]['title']} | Difference |",
+                        "|---|---|---|---|"])
         for row in review["comparison_rows"]:
-            cells = [row.get(k, "").replace("|", "\\|").replace("\n", " ") for k in ("criterion", "left", "right", "difference")]
+            values = row.get("cells", [row.get("left", ""), row.get("right", ""), row.get("difference", "")])
+            cells = [str(value).replace("|", "\\|").replace("\n", " ")
+                     for value in [row.get("criterion", ""), *values]]
             out.append("| " + " | ".join(cells) + " |")
+        out.append("")
+    if review.get("claim_rows") or review.get("coverage_rows"):
+        papers = review.get("comparison_papers", [])
+        claim_mode = bool(review.get("claim_rows"))
+        rows = review.get("claim_rows", []) if claim_mode else review.get("coverage_rows", [])
+        first_heading = "Claim" if claim_mode else "Search question"
+        headings = [first_heading] + [p.get("title", "Paper") for p in papers]
+        out.extend(["| " + " | ".join(headings) + " |", "|" + "---|" * len(headings)])
+        for row in rows:
+            label = row.get("claim", row.get("question", ""))
+            cells = [label]
+            for cell in row.get("cells", []):
+                if claim_mode:
+                    check = cell.get("verification", {})
+                    verified = (f"Human check: {check.get('status')}" +
+                                (f" — {check.get('note')}" if check.get("note") else "")) if check else "Not human reviewed"
+                    study = f"; Method/sample: {check.get('study_context')}" if check.get("study_context") else ""
+                    cells.append(f"Model: {cell.get('status', 'unclear')}; {verified}{study}: {cell.get('text', '')} {' '.join(cell.get('refs', []))}")
+                else:
+                    cells.append(("Passage found " + str(cell.get("ref")) if cell.get("found") else "No match found"))
+            out.append("| " + " | ".join(str(value).replace("|", "\\|").replace("\n", " ") for value in cells) + " |")
         out.append("")
     for section in review.get("sections", []):
         out.extend([f"## {section['heading']}", "", section["body"], ""])
@@ -546,4 +1080,9 @@ def markdown(review_id: str):
             for item in items:
                 out.append("- " + (item.get("note", item.get("claim", "")) if isinstance(item, dict) else item))
             out.append("")
+    if review.get("evidence"):
+        out.extend(["## Cited source passages", ""])
+        for i, item in enumerate(review["evidence"], start=1):
+            out.append(f"- [S{i}] {item.get('paper', 'Source')} (p. {item.get('page', '?')}): {item.get('text', '').replace(chr(10), ' ')}")
+        out.append("")
     return {"markdown": "\n".join(out)}
